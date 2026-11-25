@@ -1,0 +1,24 @@
+# Gemini 手脚架白名单模板
+#
+# 复制为 bridge/allowlist.conf 后生效（allowlist.conf 不纳入版本控制）。
+# 每行一条规则，空行和 # 开头的行忽略：
+#   可执行名                      放行这个程序的全部参数
+#   可执行名|参数1|参数2          参数必须以这些开头才放行
+#
+# 守护进程直接 exec，不经过 shell，所以这里写的是程序名，不是 shell 片段。
+# 改完不用重启守护进程，下一单请求就生效。
+# 安全提醒：不要放行 sh、bash、python3 等通用解释器；确需放行脚本请用 | 锁死绝对路径。
+
+curl
+git
+ps
+pgrep
+netstat
+lsof
+
+# 示例：仅放行只读 launchctl 查询
+# launchctl|list
+# launchctl|print
+
+# 示例：仅放行指定脚本入口
+# python3|/path/to/your/script.py

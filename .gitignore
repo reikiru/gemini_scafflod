@@ -1,0 +1,5 @@
+var/
+bridge/allowlist.conf
+__pycache__/
+*.pyc
+.DS_Store

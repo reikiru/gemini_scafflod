@@ -1,0 +1,198 @@
+#!/usr/bin/env python3
+"""Gemini 手脚架：沙盒内通用文件桥客户端。
+
+只做文件读写：写请求到 var/queue，等 var/done 里的回复。
+不建立任何网络连接，因此不会触发 Gemini 的网络访问批准。
+
+用法见项目根目录的 用法.md。
+"""
+
+import json
+import os
+import sys
+import time
+import uuid
+from datetime import datetime
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+VAR = ROOT / "var"
+QUEUE = VAR / "queue"
+DONE = VAR / "done"
+LOGFILE = VAR / "log" / "bridge.log"
+ALLOWLIST = ROOT / "bridge" / "allowlist.conf"
+
+DEFAULT_TIMEOUT = float(os.environ.get("GX_TIMEOUT", "120"))
+WAIT_SLACK = 15.0
+
+HELP_TEXT = """gx — Gemini 沙盒外通用命令桥客户端
+
+用法:
+  gx [选项] [--] <命令> [参数...]
+  gx status                  查看守护进程状态、队列深度与白名单路径
+  gx log [-n 行数]           查看审计日志（默认最近 40 行）
+
+选项:
+  -t, --timeout <秒>         单次命令超时时间（默认 120，或环境变量 GX_TIMEOUT）
+  -o, --stdout-file <路径>   将命令的原始 stdout 二进制写入指定文件（如截图/下载）
+  -h, --help                 显示此帮助
+
+示例:
+  gx curl -sI https://example.com
+  gx ps aux
+  gx --timeout 300 -- git fetch origin
+"""
+
+
+def parse_args(argv):
+    """解析 gx 自身选项，返回 (real_argv, timeout, stdout_file)。"""
+    timeout = DEFAULT_TIMEOUT
+    stdout_file = None
+    i = 0
+    while i < len(argv):
+        arg = argv[i]
+        if arg == "--":
+            i += 1
+            break
+        if arg in ("-t", "--timeout"):
+            if i + 1 >= len(argv):
+                raise SystemExit("缺少 --timeout 参数值")
+            timeout = float(argv[i + 1])
+            i += 2
+            continue
+        if arg in ("-o", "--stdout-file"):
+            if i + 1 >= len(argv):
+                raise SystemExit("缺少 --stdout-file 参数值")
+            stdout_file = os.path.abspath(os.path.expanduser(argv[i + 1]))
+            i += 2
+            continue
+        break
+    return argv[i:], timeout, stdout_file
+
+
+def submit(argv, timeout, stdout_file):
+    QUEUE.mkdir(parents=True, exist_ok=True)
+    DONE.mkdir(parents=True, exist_ok=True)
+    req_id = "%s-%s" % (datetime.now().strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:6])
+    req = {
+        "id": req_id,
+        "argv": argv,
+        "cwd": os.getcwd(),
+        "timeout": timeout,
+    }
+    if stdout_file:
+        req["stdout_file"] = stdout_file
+    if not sys.stdin.isatty():
+        stdin_text = sys.stdin.read()
+        if stdin_text:
+            req["stdin"] = stdin_text
+
+    path = QUEUE / (req_id + ".json")
+    tmp = QUEUE / (req_id + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        json.dump(req, f, ensure_ascii=False)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+    resp_path = DONE / (req_id + ".json")
+    deadline = time.time() + timeout + WAIT_SLACK
+    while time.time() < deadline:
+        if resp_path.exists():
+            for _ in range(20):
+                try:
+                    return json.loads(resp_path.read_text(encoding="utf-8"))
+                except ValueError:
+                    time.sleep(0.05)
+            return {"exit": 98, "error": "回复文件损坏"}
+        time.sleep(0.05)
+
+    return {
+        "exit": 97,
+        "error": "超时：%d 秒内没有回复。桥可能没启动，跑 gx status 看看。" % (timeout + WAIT_SLACK),
+    }
+
+
+def local_status():
+    pidfile = VAR / "bridge.pid"
+    print("项目: %s" % ROOT)
+    if pidfile.exists():
+        pid = pidfile.read_text().strip()
+        alive = False
+        try:
+            os.kill(int(pid), 0)
+            alive = True
+        except PermissionError:
+            alive = True
+        except Exception:
+            alive = False
+        print("守护进程: pid=%s %s" % (pid, "在跑" if alive else "已退出（pid 文件残留）"))
+    else:
+        print("守护进程: 没在跑")
+    q = len(list(QUEUE.glob("*.json"))) if QUEUE.is_dir() else 0
+    print("待处理: %d" % q)
+    print("白名单: %s %s" % (ALLOWLIST, "存在" if ALLOWLIST.exists() else "缺失（可从 allowlist.conf.example 复制）"))
+    return 0
+
+
+def local_log(argv):
+    lines = 40
+    if len(argv) >= 2 and argv[0] == "-n":
+        lines = int(argv[1])
+    if not LOGFILE.exists():
+        print("还没有日志")
+        return 0
+    for line in LOGFILE.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:]:
+        print(line)
+    return 0
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv or argv[0] in ("-h", "--help", "help"):
+        print(HELP_TEXT)
+        return 0
+    if argv[0] == "status":
+        return local_status()
+    if argv[0] == "log":
+        return local_log(argv[1:])
+
+    try:
+        real_argv, timeout, stdout_file = parse_args(argv)
+    except (SystemExit, ValueError) as e:
+        print(e, file=sys.stderr)
+        return 2
+
+    if not real_argv:
+        print(HELP_TEXT)
+        return 0
+
+    resp = submit(real_argv, timeout, stdout_file)
+
+    if resp.get("denied"):
+        print("被白名单拒绝：%s" % resp.get("error", ""), file=sys.stderr)
+        print("要放行就编辑 %s" % ALLOWLIST, file=sys.stderr)
+        return 126
+    if resp.get("error") and resp.get("exit") in (97, 98, 99, 127):
+        print(resp["error"], file=sys.stderr)
+        return resp.get("exit") or 1
+
+    if stdout_file and resp.get("stdout_file"):
+        print(resp["stdout_file"])
+        print("(%s 字节)" % resp.get("bytes", "?"), file=sys.stderr)
+    else:
+        sys.stdout.write(resp.get("stdout") or "")
+
+    err = resp.get("stderr")
+    if err:
+        sys.stderr.write(err)
+    if resp.get("error"):
+        sys.stderr.write("\n%s\n" % resp["error"])
+    if resp.get("timed_out"):
+        sys.stderr.write("\n命令超时，已被杀\n")
+        return 124
+    return resp.get("exit") or 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
