@@ -29,25 +29,29 @@ HELP_TEXT = """gx — Gemini 沙盒外通用命令桥客户端
 
 用法:
   gx [选项] [--] <命令> [参数...]
-  gx status                  查看守护进程状态、队列深度与白名单路径
+  gx ping [--json]           端到端探活，返回宿主机 pid、HOME、PATH 与白名单规则数
+  gx status                  查看本地 pid 文件、队列深度与白名单路径
   gx log [-n 行数]           查看审计日志（默认最近 40 行）
 
 选项:
   -t, --timeout <秒>         单次命令超时时间（默认 120，或环境变量 GX_TIMEOUT）
   -o, --stdout-file <路径>   将命令的原始 stdout 二进制写入指定文件（如截图/下载）
+  -e, --env <KEY=VAL>        向目标命令透传安全环境变量（可重复）
   -h, --help                 显示此帮助
 
 示例:
+  gx ping
   gx curl -sI https://example.com
-  gx ps aux
+  gx -e NO_COLOR=1 -- git status
   gx --timeout 300 -- git fetch origin
 """
 
 
 def parse_args(argv):
-    """解析 gx 自身选项，返回 (real_argv, timeout, stdout_file)。"""
+    """解析 gx 自身选项，返回 (real_argv, timeout, stdout_file, env_map)。"""
     timeout = DEFAULT_TIMEOUT
     stdout_file = None
+    env_map = {}
     i = 0
     while i < len(argv):
         arg = argv[i]
@@ -66,26 +70,27 @@ def parse_args(argv):
             stdout_file = os.path.abspath(os.path.expanduser(argv[i + 1]))
             i += 2
             continue
+        if arg in ("-e", "--env"):
+            if i + 1 >= len(argv):
+                raise SystemExit("缺少 --env 参数值")
+            pair = argv[i + 1]
+            if "=" not in pair:
+                raise SystemExit("--env 格式必须为 KEY=VAL: %s" % pair)
+            k, v = pair.split("=", 1)
+            if not k:
+                raise SystemExit("--env 缺少变量名: %s" % pair)
+            env_map[k] = v
+            i += 2
+            continue
         break
-    return argv[i:], timeout, stdout_file
+    return argv[i:], timeout, stdout_file, env_map
 
 
-def submit(argv, timeout, stdout_file):
+def submit_req(req, wait_timeout):
     QUEUE.mkdir(parents=True, exist_ok=True)
     DONE.mkdir(parents=True, exist_ok=True)
     req_id = "%s-%s" % (datetime.now().strftime("%Y%m%dT%H%M%S"), uuid.uuid4().hex[:6])
-    req = {
-        "id": req_id,
-        "argv": argv,
-        "cwd": os.getcwd(),
-        "timeout": timeout,
-    }
-    if stdout_file:
-        req["stdout_file"] = stdout_file
-    if not sys.stdin.isatty():
-        stdin_text = sys.stdin.read()
-        if stdin_text:
-            req["stdin"] = stdin_text
+    req["id"] = req_id
 
     path = QUEUE / (req_id + ".json")
     tmp = QUEUE / (req_id + ".tmp")
@@ -96,7 +101,7 @@ def submit(argv, timeout, stdout_file):
     os.replace(tmp, path)
 
     resp_path = DONE / (req_id + ".json")
-    deadline = time.time() + timeout + WAIT_SLACK
+    deadline = time.time() + wait_timeout
     while time.time() < deadline:
         if resp_path.exists():
             for _ in range(20):
@@ -109,8 +114,49 @@ def submit(argv, timeout, stdout_file):
 
     return {
         "exit": 97,
-        "error": "超时：%d 秒内没有回复。桥可能没启动，跑 gx status 看看。" % (timeout + WAIT_SLACK),
+        "error": "超时：%d 秒内没有回复。桥可能没启动，跑 gx status 看看。" % int(wait_timeout),
     }
+
+
+def submit(argv, timeout, stdout_file, env_map=None):
+    req = {
+        "action": "exec",
+        "argv": argv,
+        "cwd": os.getcwd(),
+        "timeout": timeout,
+    }
+    if stdout_file:
+        req["stdout_file"] = stdout_file
+    if env_map:
+        req["env"] = env_map
+    if not sys.stdin.isatty():
+        stdin_text = sys.stdin.read()
+        if stdin_text:
+            req["stdin"] = stdin_text
+    return submit_req(req, timeout + WAIT_SLACK)
+
+
+def cmd_ping(argv):
+    as_json = "--json" in argv
+    resp = submit_req({"action": "ping"}, wait_timeout=10.0)
+    if resp.get("exit") != 0 or not resp.get("ok"):
+        print(resp.get("error") or "ping 失败", file=sys.stderr)
+        return resp.get("exit") or 1
+    if as_json:
+        print(json.dumps({
+            "ok": True,
+            "pid": resp.get("pid"),
+            "uptime_sec": resp.get("uptime_sec"),
+            "home": resp.get("home"),
+            "path": resp.get("path"),
+            "rules_count": resp.get("rules_count"),
+        }, ensure_ascii=False))
+    else:
+        print("pong pid=%s uptime=%ss rules=%s" % (
+            resp.get("pid"), resp.get("uptime_sec"), resp.get("rules_count")))
+        print("home: %s" % resp.get("home"))
+        print("path: %s" % resp.get("path"))
+    return 0
 
 
 def local_status():
@@ -152,13 +198,15 @@ def main():
     if not argv or argv[0] in ("-h", "--help", "help"):
         print(HELP_TEXT)
         return 0
+    if argv[0] == "ping":
+        return cmd_ping(argv[1:])
     if argv[0] == "status":
         return local_status()
     if argv[0] == "log":
         return local_log(argv[1:])
 
     try:
-        real_argv, timeout, stdout_file = parse_args(argv)
+        real_argv, timeout, stdout_file, env_map = parse_args(argv)
     except (SystemExit, ValueError) as e:
         print(e, file=sys.stderr)
         return 2
@@ -167,11 +215,15 @@ def main():
         print(HELP_TEXT)
         return 0
 
-    resp = submit(real_argv, timeout, stdout_file)
+    resp = submit(real_argv, timeout, stdout_file, env_map)
 
     if resp.get("denied"):
-        print("被白名单拒绝：%s" % resp.get("error", ""), file=sys.stderr)
-        print("要放行就编辑 %s" % ALLOWLIST, file=sys.stderr)
+        err_msg = resp.get("error", "")
+        if "环境变量" in err_msg:
+            print("被安全策略拒绝：%s" % err_msg, file=sys.stderr)
+        else:
+            print("被白名单拒绝：%s" % err_msg, file=sys.stderr)
+            print("要放行就编辑 %s" % ALLOWLIST, file=sys.stderr)
         return 126
     if resp.get("error") and resp.get("exit") in (97, 98, 99, 127):
         print(resp["error"], file=sys.stderr)

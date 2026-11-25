@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """Gemini 手脚架：文件桥守护进程。
 
-在沙盒之外执行真正需要联网的命令。沙盒里的 gx 只做两件事：
+在沙盒之外执行真正需要联网或宿主机环境的命令。沙盒里的 gx 只做两件事：
 往 var/queue 写一个请求文件，从 var/done 读回结果文件。
 
 设计约束：
   1. 永不经过 shell，argv 直接 exec，避免命令注入。
   2. 只跑 allowlist.conf 里登记过的命令，其余一律拒绝并留痕。
   3. 每条请求都写审计日志 var/log/bridge.log。
+  4. 仅允许透传安全的环境变量，拒绝可劫持加载器或解释器的变量。
 
 Python 3.9 兼容（launchd 里用 /usr/bin/python3 拉起）。
 """
@@ -15,6 +16,7 @@ Python 3.9 兼容（launchd 里用 /usr/bin/python3 拉起）。
 import fcntl
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -36,7 +38,16 @@ MAX_CAPTURE = 2 * 1024 * 1024
 MAX_TIMEOUT = 4 * 3600
 KEEP_SEC = 24 * 3600
 
+ENV_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+BLOCKED_ENV_EXACT = {
+    "PATH", "HOME", "SHELL", "USER", "LOGNAME", "IFS",
+    "ENV", "BASH_ENV", "CDPATH", "GLOBIGNORE", "PROMPT_COMMAND",
+    "ZDOTDIR", "NODE_OPTIONS", "PERL5OPT", "RUBYOPT",
+}
+BLOCKED_ENV_PREFIXES = ("LD_", "DYLD_", "PYTHON", "BASH_FUNC_")
+
 _running = True
+_started_at = time.time()
 
 
 def now():
@@ -90,6 +101,37 @@ def check_allowed(argv, rules):
     return False, "%s 不在白名单内，或前缀参数不匹配" % binary
 
 
+def validate_env_overrides(raw_env):
+    """校验客户端传入的环境变量覆盖，拒绝危险变量。"""
+    if raw_env is None:
+        return {}, None
+    if not isinstance(raw_env, dict):
+        return None, "env 字段必须为对象"
+    clean = {}
+    for k, v in raw_env.items():
+        if not isinstance(k, str) or not isinstance(v, str) or not ENV_KEY_RE.match(k):
+            return None, "非法环境变量名或值: %r" % (k,)
+        upper = k.upper()
+        if upper in BLOCKED_ENV_EXACT or any(upper.startswith(p) for p in BLOCKED_ENV_PREFIXES):
+            return None, "环境变量 %s 被安全策略拒绝" % k
+        clean[k] = v
+    return clean, None
+
+
+def handle_ping(req_id):
+    resp = {
+        "id": req_id,
+        "exit": 0,
+        "ok": True,
+        "pid": os.getpid(),
+        "uptime_sec": round(time.time() - _started_at, 2),
+        "home": str(Path.home()),
+        "path": os.environ.get("PATH", ""),
+        "rules_count": len(load_rules()),
+    }
+    write_json_atomic(DONE / (req_id + ".json"), resp)
+
+
 def handle(req_path):
     req_id = req_path.stem
     try:
@@ -100,10 +142,24 @@ def handle(req_path):
         req_path.unlink(missing_ok=True)
         return
 
+    action = req.get("action") or "exec"
+    if action == "ping":
+        handle_ping(req_id)
+        req_path.unlink(missing_ok=True)
+        return
+
     argv = req.get("argv") or []
     if not isinstance(argv, list) or not argv or not all(isinstance(a, str) for a in argv):
         write_json_atomic(DONE / (req_id + ".json"),
                           {"id": req_id, "exit": 99, "error": "argv 非法"})
+        req_path.unlink(missing_ok=True)
+        return
+
+    env_overrides, env_err = validate_env_overrides(req.get("env"))
+    if env_err:
+        log("DENY %s env (%s)" % (req_id, env_err))
+        write_json_atomic(DONE / (req_id + ".json"),
+                          {"id": req_id, "exit": 126, "denied": True, "error": env_err})
         req_path.unlink(missing_ok=True)
         return
 
@@ -134,6 +190,9 @@ def handle(req_path):
     started = time.time()
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
+    env.setdefault("LANG", "en_US.UTF-8")
+    env.setdefault("LC_ALL", "en_US.UTF-8")
+    env.update(env_overrides)
 
     try:
         proc = subprocess.Popen(
@@ -219,6 +278,9 @@ def sweep():
 
 
 def main():
+    global _started_at
+    _started_at = time.time()
+
     for d in (QUEUE, DONE, LOGDIR):
         d.mkdir(parents=True, exist_ok=True)
 
