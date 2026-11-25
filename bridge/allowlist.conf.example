@@ -7,18 +7,30 @@
 #
 # 守护进程直接 exec，不经过 shell，所以这里写的是程序名，不是 shell 片段。
 # 改完不用重启守护进程，下一单请求就生效。
-# 安全提醒：不要放行 sh、bash、python3 等通用解释器；确需放行脚本请用 | 锁死绝对路径。
+# 安全提醒：严禁放行 sh、bash、zsh、python3、node 等通用解释器；
+# 确需放行脚本或子命令时，务必用 | 锁死绝对路径或只读前缀参数。
 
+# 1. 联网与版本控制（突破沙盒禁网与钥匙串凭据隔离）
 curl
 git
+# gh
+
+# 2. 进程与本地端口观测（突破沙盒内 ps/pgrep/lsof 限制）
 ps
 pgrep
 netstat
 lsof
 
-# 示例：仅放行只读 launchctl 查询
-# launchctl|list
-# launchctl|print
+# 3. 系统服务只读查询（突破沙盒屏蔽 launchctl / ~/Library/LaunchAgents）
+launchctl|list
+launchctl|print
 
-# 示例：仅放行指定脚本入口
+# 4. 剪贴板读写（突破沙盒剪贴板隔离，按需取消注释）
+# pbpaste
+# pbcopy
+
+# 5. 只读查看已安装应用（突破沙盒屏蔽 /Applications，按需取消注释）
+# ls|/Applications
+
+# 6. 指定脚本入口示例（用 | 锁死脚本绝对路径，适合配合 gx bg 跑长任务）
 # python3|/path/to/your/script.py
