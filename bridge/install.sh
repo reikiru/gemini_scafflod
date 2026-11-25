@@ -2,15 +2,21 @@
 # 安装文件桥：注册 launchd 用户级守护进程。
 set -euo pipefail
 
+if [ "${EUID:-$(id -u)}" -eq 0 ]; then
+  echo "请勿使用 sudo 运行 install.sh：launchd 用户级服务（gui/\$UID）必须以当前普通用户安装。" >&2
+  exit 1
+fi
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL="${GX_LABEL:-com.gemini.bridge}"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 DEFAULT_PATH="$ROOT/tools:/opt/homebrew/bin:$HOME/.homebrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 BRIDGE_PATH="${GX_PATH:-$DEFAULT_PATH}"
 
-mkdir -p "$ROOT/var/queue" "$ROOT/var/done" "$ROOT/var/log"
+mkdir -p "$HOME/Library/LaunchAgents" "$ROOT/var/queue" "$ROOT/var/done" "$ROOT/var/log"
 chmod 700 "$ROOT/var"
 chmod +x "$ROOT/bridge/gx" "$ROOT/bridge/daemon.py"
+[ -f "$ROOT/tools/web-search" ] && chmod +x "$ROOT/tools/web-search"
 
 if [ ! -f "$ROOT/bridge/allowlist.conf" ] && [ -f "$ROOT/bridge/allowlist.conf.example" ]; then
   cp "$ROOT/bridge/allowlist.conf.example" "$ROOT/bridge/allowlist.conf"
@@ -48,8 +54,18 @@ cat > "$PLIST" <<PLIST_EOF
 </plist>
 PLIST_EOF
 
+# bootout 是异步的，等待旧任务完全卸载后再 bootstrap，避免 macOS 报 Bootstrap failed: 5
 launchctl bootout "gui/$UID/$LABEL" >/dev/null 2>&1 || true
+for _ in $(seq 1 25); do
+  if ! launchctl print "gui/$UID/$LABEL" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.2
+done
+
+launchctl enable "gui/$UID/$LABEL" >/dev/null 2>&1 || true
 launchctl bootstrap "gui/$UID" "$PLIST"
+launchctl kickstart -k "gui/$UID/$LABEL" >/dev/null 2>&1 || true
 sleep 1
 
 if launchctl print "gui/$UID/$LABEL" 2>/dev/null | grep -q "state = running"; then
@@ -60,4 +76,4 @@ else
 fi
 
 echo "plist: $PLIST"
-echo "自检：$ROOT/bridge/gx status"
+echo "自检：$ROOT/bridge/gx ping"
