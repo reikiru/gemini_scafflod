@@ -33,6 +33,7 @@ LOGDIR = VAR / "log"
 LOG = LOGDIR / "bridge.log"
 PIDFILE = VAR / "bridge.pid"
 ALLOWLIST = ROOT / "bridge" / "allowlist.conf"
+ENV_CONF = ROOT / "bridge" / "env.conf"
 
 POLL_SEC = 0.05
 MAX_CAPTURE = 2 * 1024 * 1024
@@ -120,11 +121,38 @@ def validate_env_overrides(raw_env):
     return clean, None
 
 
+def load_host_env():
+    """从本机私有 bridge/env.conf 加载宿主机环境变量（热加载，不入库）。"""
+    loaded = {}
+    if not ENV_CONF.exists():
+        return loaded
+    try:
+        for raw in ENV_CONF.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if line.startswith("export "):
+                line = line[7:].strip()
+            if "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            k = k.strip()
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                v = v[1:-1]
+            if ENV_KEY_RE.match(k):
+                loaded[k] = v
+    except Exception as e:
+        log("WARN 读取 env.conf 失败: %r" % (e,))
+    return loaded
+
+
 def build_exec_env(env_overrides):
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
     env.setdefault("LANG", "en_US.UTF-8")
     env.setdefault("LC_ALL", "en_US.UTF-8")
+    env.update(load_host_env())
     env.update(env_overrides)
     return env
 

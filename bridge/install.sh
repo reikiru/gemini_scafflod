@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LABEL="${GX_LABEL:-com.gemini.bridge}"
 PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
-DEFAULT_PATH="/opt/homebrew/bin:$HOME/.homebrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+DEFAULT_PATH="$ROOT/tools:/opt/homebrew/bin:$HOME/.homebrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 BRIDGE_PATH="${GX_PATH:-$DEFAULT_PATH}"
 
 mkdir -p "$ROOT/var/queue" "$ROOT/var/done" "$ROOT/var/log"
@@ -15,6 +15,12 @@ chmod +x "$ROOT/bridge/gx" "$ROOT/bridge/daemon.py"
 if [ ! -f "$ROOT/bridge/allowlist.conf" ] && [ -f "$ROOT/bridge/allowlist.conf.example" ]; then
   cp "$ROOT/bridge/allowlist.conf.example" "$ROOT/bridge/allowlist.conf"
   echo "已从模板生成白名单：$ROOT/bridge/allowlist.conf"
+fi
+
+if [ ! -f "$ROOT/bridge/env.conf" ] && [ -f "$ROOT/bridge/env.conf.example" ]; then
+  cp "$ROOT/bridge/env.conf.example" "$ROOT/bridge/env.conf"
+  chmod 600 "$ROOT/bridge/env.conf"
+  echo "已从模板生成环境变量文件：$ROOT/bridge/env.conf"
 fi
 
 cat > "$PLIST" <<PLIST_EOF
