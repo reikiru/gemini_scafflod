@@ -22,7 +22,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+ROOT = Path(os.environ.get("GX_ROOT") or Path(__file__).resolve().parent.parent)
 VAR = ROOT / "var"
 QUEUE = VAR / "queue"
 DONE = VAR / "done"
