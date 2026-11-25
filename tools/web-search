@@ -1,0 +1,141 @@
+#!/usr/bin/env python3
+"""Zero-dependency CLI for Tavily and Exa web search APIs.
+
+Reads TAVILY_API_KEY / EXA_API_KEY from the host environment (typically loaded
+by bridge/daemon.py from bridge/env.conf).
+"""
+
+import argparse
+import json
+import os
+import sys
+import urllib.error
+import urllib.request
+
+TAVILY_ENDPOINT = "https://api.tavily.com/search"
+EXA_ENDPOINT = "https://api.exa.ai/search"
+
+
+def post_json(url, payload, headers=None, timeout=30):
+    req_headers = {"Content-Type": "application/json", "User-Agent": "gemini-scaffold-web-search/1.0"}
+    if headers:
+        req_headers.update(headers)
+    data = json.dumps(payload).encode("utf-8")
+    req = urllib.request.Request(url, data=data, headers=req_headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            return json.loads(raw), None
+    except urllib.error.HTTPError as e:
+        body = e.read().decode("utf-8", "replace") if e.fp else ""
+        return None, "HTTP %s: %s" % (e.code, body[:500])
+    except Exception as e:
+        return None, str(e)
+
+
+def run_tavily(args):
+    api_key = os.environ.get("TAVILY_API_KEY", "").strip()
+    if not api_key:
+        print("缺少环境变量 TAVILY_API_KEY（请在 bridge/env.conf 中配置）", file=sys.stderr)
+        return 2
+
+    endpoint = os.environ.get("TAVILY_API_BASE", TAVILY_ENDPOINT)
+    payload = {
+        "api_key": api_key,
+        "query": args.query,
+        "max_results": min(max(args.max_results, 1), 10),
+        "search_depth": args.depth,
+        "include_answer": args.answer,
+    }
+    data, err = post_json(endpoint, payload, timeout=args.timeout)
+    if err:
+        print("Tavily 请求失败: %s" % err, file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+
+    lines = []
+    if data.get("answer"):
+        lines.append("Answer: %s" % data["answer"])
+    for idx, item in enumerate(data.get("results") or [], start=1):
+        title = item.get("title") or "(no title)"
+        url = item.get("url") or ""
+        content = (item.get("content") or "").strip()
+        lines.append("%d. %s\n   %s\n   %s" % (idx, title, url, content))
+    print("\n\n".join(lines) if lines else "No results.")
+    return 0
+
+
+def run_exa(args):
+    api_key = os.environ.get("EXA_API_KEY", "").strip()
+    if not api_key:
+        print("缺少环境变量 EXA_API_KEY（请在 bridge/env.conf 中配置）", file=sys.stderr)
+        return 2
+
+    endpoint = os.environ.get("EXA_API_BASE", EXA_ENDPOINT)
+    payload = {
+        "query": args.query,
+        "numResults": min(max(args.num_results, 1), 20),
+        "type": args.type,
+    }
+    if args.contents:
+        payload["contents"] = {"text": {"maxCharacters": args.max_chars}}
+
+    data, err = post_json(endpoint, payload, headers={"x-api-key": api_key}, timeout=args.timeout)
+    if err:
+        print("Exa 请求失败: %s" % err, file=sys.stderr)
+        return 1
+
+    if args.json:
+        print(json.dumps(data, ensure_ascii=False, indent=2))
+        return 0
+
+    lines = []
+    for idx, item in enumerate(data.get("results") or [], start=1):
+        title = item.get("title") or "(no title)"
+        url = item.get("url") or ""
+        snippet = (item.get("text") or item.get("summary") or "").strip()
+        entry = "%d. %s\n   %s" % (idx, title, url)
+        if snippet:
+            entry += "\n   %s" % snippet[:600]
+        lines.append(entry)
+    print("\n\n".join(lines) if lines else "No results.")
+    return 0
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="web-search", description="Tavily / Exa 联网搜索 CLI")
+    sub = parser.add_subparsers(dest="provider", required=True)
+
+    p_tav = sub.add_parser("tavily", help="使用 Tavily 搜索")
+    p_tav.add_argument("query", help="搜索关键词或问题")
+    p_tav.add_argument("--max-results", type=int, default=5, help="返回条数（1-10，默认 5）")
+    p_tav.add_argument("--depth", choices=("basic", "advanced"), default="basic", help="搜索深度")
+    p_tav.add_argument("--no-answer", dest="answer", action="store_false", help="不返回摘要回答")
+    p_tav.add_argument("--timeout", type=int, default=30, help="请求超时秒数")
+    p_tav.add_argument("--json", action="store_true", help="输出原始 JSON")
+    p_tav.set_defaults(func=run_tavily, answer=True)
+
+    p_exa = sub.add_parser("exa", help="使用 Exa 语义/关键词搜索")
+    p_exa.add_argument("query", help="搜索关键词或语义查询")
+    p_exa.add_argument("--num-results", type=int, default=5, help="返回条数（1-20，默认 5）")
+    p_exa.add_argument("--type", choices=("auto", "neural", "keyword"), default="auto", help="检索模式")
+    p_exa.add_argument("--contents", action="store_true", help="附带正文抽取")
+    p_exa.add_argument("--max-chars", type=int, default=1500, help="每条正文最大字符数")
+    p_exa.add_argument("--timeout", type=int, default=30, help="请求超时秒数")
+    p_exa.add_argument("--json", action="store_true", help="输出原始 JSON")
+    p_exa.set_defaults(func=run_exa)
+
+    return parser
+
+
+def main(argv=None):
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
