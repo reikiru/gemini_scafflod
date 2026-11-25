@@ -15,10 +15,16 @@ gemini_scaffold/
 ├── .gitignore
 ├── bridge/
 │   ├── gx                       沙盒内通用客户端（同步、后台作业、探活、日志）
-│   ├── daemon.py                沙盒外常驻守护进程（白名单 exec + 后台作业池）
+│   ├── daemon.py                沙盒外常驻守护进程（白名单 exec + 后台作业池 + env.conf 热加载）
 │   ├── allowlist.conf.example   白名单模板（本机复制为 allowlist.conf）
+│   ├── env.conf.example         宿主机密钥模板（本机复制为 env.conf，不入库）
 │   ├── install.sh               注册 launchd 服务
 │   └── uninstall.sh             卸载 launchd 服务
+├── tools/
+│   └── web-search               零依赖 Tavily / Exa 联网搜索 CLI
+├── scripts/
+│   └── bootstrap-env.sh         从本机 shell 配置同步搜索 API Key 到 bridge/env.conf
+├── skills/                      设备解耦的 Gemini Skill 模板（agent-browser / firecrawl / web-search-api）
 ├── tests/                       零依赖 unittest 自动化测试套件
 └── var/                         本机运行时数据：queue、done、jobs、log（不入库）
 ```
