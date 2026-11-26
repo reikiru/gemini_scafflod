@@ -1,6 +1,7 @@
 var/
 bridge/allowlist.conf
 bridge/env.conf
+skills/
 __pycache__/
 *.pyc
 .DS_Store

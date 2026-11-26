@@ -24,7 +24,6 @@ gemini_scaffold/
 │   └── web-search               零依赖 Tavily / Exa 联网搜索 CLI
 ├── scripts/
 │   └── bootstrap-env.sh         从本机 shell 配置同步搜索 API Key 到 bridge/env.conf
-├── skills/                      设备解耦的 Gemini Skill 模板（agent-browser / firecrawl / web-search-api）
 ├── tests/                       零依赖 unittest 自动化测试套件
 └── var/                         本机运行时数据：queue、done、jobs、log（不入库）
 ```

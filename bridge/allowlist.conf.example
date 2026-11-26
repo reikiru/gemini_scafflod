@@ -32,7 +32,7 @@ launchctl|print
 # 5. 只读查看已安装应用（突破沙盒屏蔽 /Applications，按需取消注释）
 # ls|/Applications
 
-# 6. 联网搜索与浏览器自动化（配合 bridge/env.conf 与 skills/ 使用，按需取消注释）
+# 6. 联网搜索与浏览器自动化（配合 bridge/env.conf 使用，按需取消注释）
 # web-search
 # firecrawl
 # agent-browser
